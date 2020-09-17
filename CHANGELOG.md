@@ -50,6 +50,8 @@ Line wrap the file at 100 chars.                                              Th
   blocking state and sometimes open the UI for the user to login. Now it always opens the UI.
 - Mark the VPN connection as not metered, so that Android properly reports if the connection is or
   isn't metered based solely on the underlying network, and not on the VPN connection.
+- Fix the notification sometimes leaving the foreground and becoming dismissable even if the UI was
+  still visible.
 
 #### Linux
 - Fix split tunneling rules preventing `systemd-resolved` from performing DNS lookups for excluded
