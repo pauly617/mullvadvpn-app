@@ -27,6 +27,7 @@ class MainActivity : FragmentActivity() {
     val problemReport = MullvadProblemReport()
     val serviceNotifier = EventNotifier<ServiceConnection?>(null)
 
+    private var isUiVisible = false
     private var quitting = false
     private var service: MullvadVpnService.LocalBinder? = null
     private var serviceConnection: ServiceConnection? = null
@@ -39,6 +40,8 @@ class MainActivity : FragmentActivity() {
             val localBinder = binder as MullvadVpnService.LocalBinder
 
             service = localBinder
+
+            localBinder.isUiVisible = isUiVisible
 
             localBinder.serviceNotifier.subscribe(this@MainActivity) { service ->
                 android.util.Log.d("mullvad", "UI connection to the service changed: $service")
@@ -88,6 +91,8 @@ class MainActivity : FragmentActivity() {
         android.util.Log.d("mullvad", "Starting main activity")
         super.onStart()
 
+        isUiVisible = true
+
         if (!quitting) {
             android.util.Log.d("mullvad", "Starting background service")
             val intent = Intent(this, MullvadVpnService::class.java)
@@ -99,6 +104,7 @@ class MainActivity : FragmentActivity() {
             }
 
             bindService(intent, serviceConnectionManager, 0)
+            service?.isUiVisible = true
         }
     }
 
@@ -108,6 +114,8 @@ class MainActivity : FragmentActivity() {
 
     override fun onStop() {
         android.util.Log.d("mullvad", "Stoping main activity")
+        isUiVisible = false
+        service?.isUiVisible = false
         unbindService(serviceConnectionManager)
 
         super.onStop()
