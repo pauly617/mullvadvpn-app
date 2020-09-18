@@ -20,7 +20,9 @@ use netlink_packet_route::{
     link::{nlas::Nla as LinkNla, LinkMessage},
     route::{nlas::Nla as RouteNla, RouteHeader, RouteMessage},
     rtnl::{
-        constants::{RTN_UNICAST, RTPROT_STATIC, RT_SCOPE_UNIVERSE, RT_TABLE_MAIN},
+        constants::{
+            RTN_UNICAST, RTPROT_STATIC, RT_SCOPE_UNIVERSE, RT_TABLE_COMPAT, RT_TABLE_MAIN,
+        },
         RouteFlags,
     },
     NetlinkMessage, NetlinkPayload, RtnlMessage,
@@ -82,7 +84,7 @@ pub enum Error {
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 struct RequiredDefaultRoute {
-    table_id: u8,
+    table_id: u32,
     destination: IpNetwork,
 }
 
@@ -217,7 +219,7 @@ impl RouteManagerImpl {
             ipnetwork::IpNetwork::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0).unwrap();
         let mut required_routes = HashSet::new();
         required_routes.insert(
-            RequiredRoute::new(zero_network, NetNode::DefaultNode).table(self.split_table_id as u8),
+            RequiredRoute::new(zero_network, NetNode::DefaultNode).table(self.split_table_id),
         );
         self.add_required_routes(required_routes).await
     }
@@ -256,7 +258,7 @@ impl RouteManagerImpl {
                     IpNetwork::from(*server),
                     Node::device(tunnel_alias.to_string()),
                 )
-                .table(self.split_table_id as u8),
+                .table(self.split_table_id),
             );
         }
 
@@ -609,6 +611,7 @@ impl RouteManagerImpl {
 
         let destination_length = msg.header.destination_prefix_length;
         let af_spec = msg.header.address_family;
+        let mut table_id = u32::from(msg.header.table);
 
         for nla in msg.nlas.iter() {
             match nla {
@@ -642,6 +645,10 @@ impl RouteManagerImpl {
                 RouteNla::Priority(priority) => {
                     metric = Some(*priority);
                 }
+
+                RouteNla::Table(id) => {
+                    table_id = *id;
+                }
                 _ => continue,
             }
         }
@@ -669,7 +676,7 @@ impl RouteManagerImpl {
             node,
             prefix: prefix.unwrap(),
             metric,
-            table_id: msg.header.table,
+            table_id,
         }))
     }
 
@@ -699,6 +706,7 @@ impl RouteManagerImpl {
     }
 
     async fn delete_route(&self, route: &Route) -> Result<()> {
+        let compat_table = compat_table_id(route.table_id);
         let mut route_message = RouteMessage {
             header: RouteHeader {
                 address_family: if route.prefix.is_ipv4() {
@@ -709,7 +717,7 @@ impl RouteManagerImpl {
                 source_prefix_length: 0,
                 destination_prefix_length: route.prefix.prefix(),
                 tos: 0u8,
-                table: route.table_id,
+                table: compat_table,
                 protocol: RTPROT_STATIC,
                 scope: RT_SCOPE_UNIVERSE,
                 kind: RTN_UNICAST,
@@ -717,6 +725,10 @@ impl RouteManagerImpl {
             },
             nlas: vec![RouteNla::Destination(ip_to_bytes(route.prefix.ip()))],
         };
+        if compat_table == RT_TABLE_COMPAT {
+            route_message.nlas.push(RouteNla::Table(route.table_id));
+        }
+
         if let Some(interface_name) = route.node.get_device() {
             if let Some(iface_idx) = self.find_iface_idx(interface_name) {
                 route_message.nlas.push(RouteNla::Oif(iface_idx));
@@ -742,14 +754,13 @@ impl RouteManagerImpl {
     }
 
     async fn add_route(&mut self, route: Route) -> Result<()> {
-        let add_message = match &route.prefix {
+        let mut add_message = match &route.prefix {
             IpNetwork::V4(v4_prefix) => {
                 let mut add_message = self
                     .handle
                     .route()
                     .add_v4()
-                    .destination_prefix(v4_prefix.ip(), v4_prefix.prefix())
-                    .table(route.table_id);
+                    .destination_prefix(v4_prefix.ip(), v4_prefix.prefix());
 
                 if v4_prefix.prefix() > 0 && v4_prefix.prefix() < 32 {
                     add_message = add_message.scope(RT_SCOPE_LINK);
@@ -773,8 +784,7 @@ impl RouteManagerImpl {
                     .handle
                     .route()
                     .add_v6()
-                    .destination_prefix(v6_prefix.ip(), v6_prefix.prefix())
-                    .table(route.table_id);
+                    .destination_prefix(v6_prefix.ip(), v6_prefix.prefix());
 
                 if v6_prefix.prefix() > 0 && v6_prefix.prefix() < 128 {
                     add_message = add_message.scope(RT_SCOPE_LINK);
@@ -793,6 +803,12 @@ impl RouteManagerImpl {
                 add_message.message_mut().clone()
             }
         };
+
+        let compat_table = compat_table_id(route.table_id);
+        add_message.header.table = compat_table;
+        if compat_table == RT_TABLE_COMPAT {
+            add_message.nlas.push(RouteNla::Table(route.table_id));
+        }
 
         // Need to modify the request in place to set the correct flags to be able to replace any
         // existing routes - self.handle.route().add_v4().execute() sets the NLM_F_EXCL flag which
@@ -837,6 +853,15 @@ fn exec_ip(args: &[&str]) -> Result<()> {
         Ok(())
     } else {
         Err(Error::IpFailed)
+    }
+}
+
+fn compat_table_id(id: u32) -> u8 {
+    // RT_TABLE_COMPAT must be combined with nla Table(id)
+    if id > 255 {
+        RT_TABLE_COMPAT
+    } else {
+        id as u8
     }
 }
 
